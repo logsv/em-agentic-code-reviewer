@@ -2,15 +2,6 @@
 
 This project is an **AI-powered code review assistant** designed to help engineering managers and teams perform high-quality, strategic code reviews. It leverages large language models (LLMs) to analyze code diffs, provide actionable review comments, and generate PR summaries based on best practices and team guiding principles.
 
-## 🏗️ Architecture
-
-Built following **SOLID principles** and **design patterns**:
-- **Strategy Pattern**: Different LLM providers implement the same interface
-- **Factory Pattern**: Centralized provider creation and management
-- **Open/Closed Principle**: Easy to add new providers without modifying existing code
-- **Single Responsibility**: Each provider handles its own configuration and initialization
-- **Dependency Inversion**: High-level modules don't depend on low-level modules
-
 ## Features
 - Automated, detailed code review comments for each file in a pull request
 - Strategic PR summary generation (What/Why, Risks, Actions)
@@ -97,9 +88,6 @@ ollama pull mistral
 # Unix/macOS
 chmod +x start_ollama.sh
 ./start_ollama.sh --daemon
-
-# Windows PowerShell
-.\start_ollama.ps1 -Daemon
 
 # Python script (cross-platform)
 python start_ollama.py --daemon
