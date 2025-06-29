@@ -18,6 +18,7 @@ try:
 except ImportError:
     ollama = None
 
+
 TEAM_GUIDING_PRINCIPLES = [
     "Code readability & overall architecture clarity",
     "Scalability, performance, and operational considerations",

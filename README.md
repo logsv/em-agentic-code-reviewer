@@ -326,4 +326,4 @@ class MyProvider(BaseLLMProvider):
 MIT License (add your own if different)
 
 ## Contact
-For questions or suggestions, open an issue or contact the maintainer. 
+For questions or suggestions, open an issue or contact the maintainer (vikas.mca.jnu@gmail.com). 
