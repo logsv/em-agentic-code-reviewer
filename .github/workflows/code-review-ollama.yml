@@ -1,0 +1,127 @@
+name: AI Code Review (Ollama)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main, develop]
+
+jobs:
+  code-review-ollama:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Fetch all history for proper diff generation
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Install Ollama
+      run: |
+        curl -fsSL https://ollama.ai/install.sh | sh
+        ollama --version
+    
+    - name: Pull Ollama model
+      run: |
+        MODEL="llama3"
+        echo "Pulling Ollama model: $MODEL"
+        ollama pull $MODEL
+    
+    - name: Start Ollama service
+      run: |
+        ollama serve &
+        sleep 10  # Wait for service to start
+    
+    - name: Generate diff and run code review
+      run: |
+        # For pull requests, compare against base branch
+        if [ "${{ github.event_name }}" = "pull_request" ]; then
+          BASE_BRANCH="${{ github.base_ref }}"
+          CURRENT_BRANCH="${{ github.head_ref }}"
+        else
+          # For pushes, compare against previous commit
+          BASE_BRANCH="${{ github.event.before }}"
+          CURRENT_BRANCH="${{ github.event.after }}"
+        fi
+        
+        echo "Comparing $CURRENT_BRANCH against $BASE_BRANCH"
+        
+        # Generate diff.json
+        python diff_generator_agent.py --base "$BASE_BRANCH" --target "$CURRENT_BRANCH" --output diff.json
+        
+        # Check if diff.json was generated and has content
+        if [ ! -f diff.json ] || [ ! -s diff.json ]; then
+          echo "No changes found or diff.json is empty"
+          exit 0
+        fi
+        
+        # Run code review with Ollama
+        MODEL="llama3"
+        
+        echo "Running code review with Ollama/$MODEL"
+        python eng_manager_review_agent.py diff.json ollama "$MODEL" > review_results.json
+        
+        # Display results
+        echo "=== CODE REVIEW RESULTS ==="
+        cat review_results.json
+    
+    - name: Comment on PR
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          
+          try {
+            const reviewData = JSON.parse(fs.readFileSync('review_results.json', 'utf8'));
+            
+            let comment = '## 🤖 AI Code Review Results (Ollama)\n\n';
+            
+            if (reviewData.pr_description) {
+              comment += '### 📋 PR Summary\n';
+              comment += reviewData.pr_description + '\n\n';
+            }
+            
+            if (reviewData.comments && reviewData.comments.length > 0) {
+              comment += '### 📝 File Reviews\n\n';
+              
+              reviewData.comments.forEach(fileReview => {
+                comment += `#### 📄 ${fileReview.file}\n`;
+                comment += '```\n';
+                comment += fileReview.review;
+                comment += '\n```\n\n';
+              });
+            }
+            
+            comment += '---\n';
+            comment += '*This review was generated automatically using Ollama local models.*';
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+            
+          } catch (error) {
+            console.log('No review results found or error parsing results');
+          }
+    
+    - name: Upload review results as artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: code-review-results-ollama
+        path: |
+          diff.json
+          review_results.json
+        retention-days: 7 

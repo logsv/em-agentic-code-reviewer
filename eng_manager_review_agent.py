@@ -1,10 +1,8 @@
 import os
 import json
 from langgraph.graph import StateGraph, END
-from langchain_openai import ChatOpenAI
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_community.llms.ollama import Ollama
 from langchain_core.messages import HumanMessage, SystemMessage
+from llm_providers.factory import LLMProviderFactory
 
 # Optional: import LLM SDKs
 try:
@@ -136,16 +134,19 @@ ANTI_PATTERNS = [
     },
 ]
 
-def get_llm(provider: str, model: str = None):
-    provider = provider.lower()
-    if provider == "openai":
-        return ChatOpenAI(model=model or "gpt-4", api_key=os.getenv("OPENAI_API_KEY"))
-    elif provider == "gemini":
-        return ChatGoogleGenerativeAI(model=model or "gemini-pro", google_api_key=os.getenv("GEMINI_API_KEY"))
-    elif provider == "ollama":
-        return Ollama(model=model or "llama3")
-    else:
-        raise ValueError(f"Unknown provider: {provider}")
+def get_llm_provider(provider: str, model: str = None, **kwargs):
+    """
+    Get LLM provider using factory pattern.
+    
+    Args:
+        provider: Provider name (openai, gemini, claude, local)
+        model: Model name (optional, uses default if not provided)
+        **kwargs: Additional provider-specific configuration
+        
+    Returns:
+        LLM provider instance
+    """
+    return LLMProviderFactory.create_provider(provider, model, **kwargs)
 
 def parse_unified_diff(diff_str: str):
     changes = []
@@ -164,7 +165,7 @@ def parse_unified_diff(diff_str: str):
 
 # Node: Generate review comments for a file
 def review_file_node(state):
-    llm = state["llm"]
+    llm_provider = state["llm_provider"]
     file_path = state["file_path"]
     diff_str = state["diff_str"]
     points_str = ""
@@ -180,27 +181,25 @@ def review_file_node(state):
         "Please provide detailed, actionable review comments for this diff, referencing the above. "
         "If you spot any anti-patterns, call them out and suggest concrete improvements."
     )
-    response = llm.invoke([
-        SystemMessage(content="You are an expert engineering manager reviewing code changes."),
-        HumanMessage(content=prompt)
-    ])
-    state["review"] = response.content
+    
+    system_prompt = "You are an expert engineering manager reviewing code changes."
+    response = llm_provider.invoke_simple(prompt, system_prompt)
+    state["review"] = response
     return state
 
 # Node: Generate PR summary
 def pr_summary_node(state):
-    llm = state["llm"]
+    llm_provider = state["llm_provider"]
     files = state["files"]
     prompt = (
         f"Files changed: {list(files.keys())}\n"
         f"Guiding Principles: {TEAM_GUIDING_PRINCIPLES}\n"
         "Write a strategic PR summary (What/Why, Risks, Actions) for these changes."
     )
-    response = llm.invoke([
-        SystemMessage(content="You are an expert engineering manager reviewing code changes."),
-        HumanMessage(content=prompt)
-    ])
-    state["pr_description"] = response.content
+    
+    system_prompt = "You are an expert engineering manager reviewing code changes."
+    response = llm_provider.invoke_simple(prompt, system_prompt)
+    state["pr_description"] = response
     return state
 
 # Node: Aggregate results
@@ -211,12 +210,12 @@ def aggregate_node(state):
         "pr_description": state["pr_description"]
     }
 
-def main(input_json_file, provider, model=None):
+def main(input_json_file, provider, model=None, **kwargs):
     with open(input_json_file, "r") as f:
         payload = json.load(f)
     files = payload.get("files", {})
 
-    llm = get_llm(provider, model)
+    llm_provider = get_llm_provider(provider, model, **kwargs)
 
     # Build the graph
     graph = StateGraph()
@@ -252,7 +251,7 @@ def main(input_json_file, provider, model=None):
 
     # Initial state
     state = {
-        "llm": llm,
+        "llm_provider": llm_provider,
         "files": files,
         "all_reviews": []
     }
@@ -279,8 +278,11 @@ def main(input_json_file, provider, model=None):
 if __name__ == "__main__":
     import sys
     if len(sys.argv) < 3:
-        print("Usage: python eng_manager_review_agent_langgraph.py <input_json_file> <provider> [<model>]")
-        print("Providers: openai, gemini, ollama")
+        print("Usage: python eng_manager_review_agent.py <input_json_file> <provider> [<model>]")
+        print("Providers:", ", ".join(LLMProviderFactory.get_supported_providers()))
+        print("\nProvider Info:")
+        for name, info in LLMProviderFactory.get_provider_info().items():
+            print(f"  {name}: {info['default_model']} (default)")
         exit(1)
     input_file = sys.argv[1]
     provider = sys.argv[2]
