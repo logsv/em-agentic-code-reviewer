@@ -69,7 +69,7 @@ jobs:
         MODEL="llama3"
         
         echo "Running code review with Ollama/$MODEL"
-        python eng_manager_review_agent.py diff.json ollama "$MODEL" > review_results.json
+        python eng_manager_review_agent.py diff.json local "$MODEL" > review_results.json
         
         # Display results
         echo "=== CODE REVIEW RESULTS ==="
