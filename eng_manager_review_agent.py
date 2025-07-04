@@ -3,6 +3,9 @@ import json
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import HumanMessage, SystemMessage
 from llm_providers.factory import LLMProviderFactory
+from diff_generator_agent import DiffGeneratorAgent
+from tools import run_flake8, run_bandit, run_snyk, run_mypy, run_pylint, run_eslint, run_npm_audit, run_golint, run_gosec, run_govulncheck, TOOLS
+from repo_utils import detect_repo_types, get_tools_for_repo_types
 
 # Optional: import LLM SDKs
 try:
@@ -18,6 +21,32 @@ try:
 except ImportError:
     ollama = None
 
+# Tool functions
+import subprocess
+
+def run_flake8(repo_path):
+    result = subprocess.run([
+        "flake8", repo_path
+    ], capture_output=True, text=True)
+    return result.stdout
+
+def run_bandit(repo_path):
+    result = subprocess.run([
+        "bandit", "-r", repo_path, "-f", "json"
+    ], capture_output=True, text=True)
+    return result.stdout
+
+def run_snyk(repo_path):
+    result = subprocess.run([
+        "snyk", "test", repo_path, "--json"
+    ], capture_output=True, text=True)
+    return result.stdout
+
+TOOLS = {
+    "flake8": run_flake8,
+    "bandit": run_bandit,
+    "snyk": run_snyk,
+}
 
 TEAM_GUIDING_PRINCIPLES = [
     "Code readability & overall architecture clarity",
@@ -169,20 +198,24 @@ def review_file_node(state):
     llm_provider = state["llm_provider"]
     file_path = state["file_path"]
     diff_str = state["diff_str"]
+    flake8_report = state.get("flake8_report", "")
+    bandit_report = state.get("bandit_report", "")
+    snyk_report = state.get("snyk_report", "")
     points_str = ""
     for section, points in REVIEW_POINTS:
         points_str += f"\n{section}:\n"
         for p in points:
             points_str += f"- {p}\n"
-
     prompt = (
         f"File: {file_path}\n"
         f"Diff:\n{diff_str}\n"
+        f"Flake8 Linting Report (if any):\n{flake8_report}\n"
+        f"Bandit Security Report (if any):\n{bandit_report}\n"
+        f"Snyk Vulnerability Report (if any):\n{snyk_report}\n"
         f"Review Points and Anti-Patterns to check for:\n{points_str}\n"
         "Please provide detailed, actionable review comments for this diff, referencing the above. "
         "If you spot any anti-patterns, call them out and suggest concrete improvements."
     )
-    
     system_prompt = "You are an expert engineering manager reviewing code changes."
     response = llm_provider.invoke_simple(prompt, system_prompt)
     state["review"] = response
@@ -211,57 +244,84 @@ def aggregate_node(state):
         "pr_description": state["pr_description"]
     }
 
-def main(input_json_file, provider, model=None, **kwargs):
-    with open(input_json_file, "r") as f:
-        payload = json.load(f)
-    files = payload.get("files", {})
+# Node: Diff Generator
+def diff_generator_node(state):
+    repo_path = state.get("repo_path", ".")
+    mode = state.get("mode", "branch")
+    base = state.get("base", "main")
+    target = state.get("target", "HEAD")
+    commit_hash = state.get("commit_hash")
+    agent = DiffGeneratorAgent(repo_path)
+    if mode == "staged":
+        diffs = agent.get_staged_diff()
+    elif mode == "unstaged":
+        diffs = agent.get_unstaged_diff()
+    elif mode == "commit":
+        if not commit_hash:
+            raise ValueError("commit_hash required for commit mode")
+        diffs = agent.get_commit_diff(commit_hash)
+    else:
+        diffs = agent.get_diff(base, target)
+    state["files"] = diffs
+    return state
 
+def main(input_json_file=None, provider=None, model=None, **kwargs):
+    # If input_json_file is provided, use it (legacy mode), else use diff_generator_node
+    files = {}
+    if input_json_file:
+        with open(input_json_file, "r") as f:
+            payload = json.load(f)
+        files = payload.get("files", {})
     llm_provider = get_llm_provider(provider, model, **kwargs)
-
-    # Build the graph
     graph = StateGraph()
-    # For each file, add a review node
-    for file_path, diff_str in files.items():
-        def make_review_node(fp, ds):
-            return lambda state: review_file_node({**state, "file_path": fp, "diff_str": ds})
-        graph.add_node(f"review_{file_path}", make_review_node(file_path, diff_str))
-    # Add PR summary node
+    # Add diff generator node
+    graph.add_node("diff_generator", diff_generator_node)
+    graph.add_node("tool_agent", tool_agent_node)
+    # For each file, add a review node (these will be added after diff generation)
+    def make_review_node(fp, ds):
+        return lambda state: review_file_node({**state, "file_path": fp, "diff_str": ds})
+    # We'll add review nodes dynamically after diff generation
     graph.add_node("pr_summary", pr_summary_node)
-    # Add aggregate node
     graph.add_node("aggregate", aggregate_node)
-
-    # Define transitions
-    # Start with first file review
-    file_paths = list(files.keys())
-    if not file_paths:
-        print("No files to review.")
-        return
-    for i, file_path in enumerate(file_paths):
-        if i == 0:
-            graph.set_entry(f"review_{file_path}")
-        if i < len(file_paths) - 1:
-            # After each review, go to next review
-            graph.add_edge(f"review_{file_path}", f"review_{file_paths[i+1]}")
-        else:
-            # After last review, go to pr_summary
-            graph.add_edge(f"review_{file_path}", "pr_summary")
-    # After pr_summary, go to aggregate
-    graph.add_edge("pr_summary", "aggregate")
-    # End after aggregate
-    graph.set_exit("aggregate")
-
+    # Set entry to diff_generator
+    graph.set_entry("diff_generator")
+    # After diff_generator, dynamically add review nodes or go to aggregate if no files
+    graph.add_edge("diff_generator", "tool_agent")
+    def after_tool_agent(state):
+        files = state.get("files", {})
+        file_paths = list(files.keys())
+        if not file_paths:
+            return "aggregate"
+        # Add review nodes for each file
+        for file_path in file_paths:
+            graph.add_node(f"review_{file_path}", make_review_node(file_path, files[file_path]))
+        # Add edges between review nodes
+        for i, file_path in enumerate(file_paths):
+            if i < len(file_paths) - 1:
+                graph.add_edge(f"review_{file_path}", f"review_{file_paths[i+1]}")
+            else:
+                graph.add_edge(f"review_{file_path}", "pr_summary")
+        graph.add_edge("pr_summary", "aggregate")
+        graph.set_exit("aggregate")
+        return f"review_{file_paths[0]}"
+    graph.add_edge("tool_agent", after_tool_agent)
     # Initial state
     state = {
         "llm_provider": llm_provider,
-        "files": files,
+        "repo_path": kwargs.get("repo_path", "."),
+        "mode": kwargs.get("mode", "branch"),
+        "base": kwargs.get("base", "main"),
+        "target": kwargs.get("target", "HEAD"),
+        "commit_hash": kwargs.get("commit_hash"),
         "all_reviews": []
     }
-
-    # Run the graph
     def on_node(node_name, state):
+        if node_name == "diff_generator":
+            return diff_generator_node(state)
+        if node_name == "tool_agent":
+            return tool_agent_node(state)
         if node_name.startswith("review_"):
             result = review_file_node(state)
-            # Collect reviews
             state.setdefault("all_reviews", []).append({
                 "file": state["file_path"],
                 "review": result["review"]
@@ -272,20 +332,33 @@ def main(input_json_file, provider, model=None, **kwargs):
         elif node_name == "aggregate":
             return aggregate_node(state)
         return state
-
     result = graph.run(state, on_node=on_node)
     print(json.dumps(result, indent=2))
 
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) < 3:
-        print("Usage: python eng_manager_review_agent.py <input_json_file> <provider> [<model>]")
-        print("Providers:", ", ".join(LLMProviderFactory.get_supported_providers()))
-        print("\nProvider Info:")
-        for name, info in LLMProviderFactory.get_provider_info().items():
-            print(f"  {name}: {info['default_model']} (default)")
-        exit(1)
-    input_file = sys.argv[1]
-    provider = sys.argv[2]
-    model = sys.argv[3] if len(sys.argv) > 3 else None
-    main(input_file, provider, model) 
+    # Accept both legacy (input_json_file) and new (repo_path, mode, etc.) usage
+    if len(sys.argv) >= 3:
+        input_file = sys.argv[1]
+        provider = sys.argv[2]
+        model = sys.argv[3] if len(sys.argv) > 3 else None
+        main(input_file, provider, model)
+    else:
+        # New usage: all config via kwargs or environment
+        # Example: python eng_manager_review_agent.py --repo-path . --mode branch --base main --target HEAD --provider openai --model gpt-4
+        import argparse
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--repo-path', default='.', help='Path to git repository (default: current directory)')
+        parser.add_argument('--mode', choices=['branch', 'staged', 'unstaged', 'commit'], default='branch', help='Diff mode (default: branch)')
+        parser.add_argument('--base', default='main', help='Base reference for branch comparison (default: main)')
+        parser.add_argument('--target', default='HEAD', help='Target reference for branch comparison (default: HEAD)')
+        parser.add_argument('--commit-hash', help='Commit hash for commit mode')
+        parser.add_argument('--provider', required=True, help='LLM provider (openai, gemini, claude, local)')
+        parser.add_argument('--model', help='Model name (optional)')
+        args = parser.parse_args()
+        main(None, args.provider, args.model,
+             repo_path=args.repo_path,
+             mode=args.mode,
+             base=args.base,
+             target=args.target,
+             commit_hash=args.commit_hash) 
