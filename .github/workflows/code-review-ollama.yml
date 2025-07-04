@@ -124,4 +124,33 @@ jobs:
         path: |
           diff.json
           review_results.json
-        retention-days: 7 
+        retention-days: 7
+    
+    - name: Install Node.js tools if needed
+      run: |
+        if [ -f package.json ]; then
+          echo "Installing Node.js devDependencies (all review tools)"
+          npm ci
+        fi
+    - name: Run Node.js code review scripts if needed
+      run: |
+        if [ -f package.json ]; then
+          echo "Running Node.js code review scripts (lint, prettier, stylelint, markdownlint, jsonlint, depcheck, audit)"
+          npm run lint || true
+          npm run prettier || true
+          npm run stylelint || true
+          npm run markdownlint || true
+          npm run jsonlint || true
+          npm run depcheck || true
+          npm run audit || true
+        fi
+    
+    - name: Install Go tools if needed
+      run: |
+        if [ -f go.mod ]; then
+          echo "Installing Go tools (golint, gosec, govulncheck)"
+          go install golang.org/x/lint/golint@v0.0.0-20201208152925-83fdc39ff7b5
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.19.0
+          go install golang.org/x/vuln/cmd/govulncheck@v1.0.1
+          export PATH=$PATH:$(go env GOPATH)/bin
+        fi 

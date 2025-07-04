@@ -5,3 +5,13 @@ langchain-anthropic==0.1.1
 langchain-community==0.0.20
 langgraph==0.0.20
 requests==2.31.0
+# --- Python code analysis tools ---
+flake8==7.3.0
+bandit==1.8.5
+mypy==1.16.1
+pylint==3.3.7
+safety==3.5.2
+radon==6.0.1
+coverage==7.9.2
+vulture
+pydocstyle==6.3.0
